@@ -1,0 +1,12 @@
+.venv/
+.env
+.env.*
+!.env.example
+*.db
+*.db-*
+*.sqlite*
+__pycache__/
+.pytest_cache/
+*.py[cod]
+private/
+elanco-tick-sighting*.json
