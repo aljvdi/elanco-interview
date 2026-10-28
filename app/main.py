@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import FastAPI, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from peewee import OperationalError, fn
 
 from app.database import create_store, initialize
@@ -20,7 +20,21 @@ def create_app(db_path: str | None = None) -> FastAPI:
         if not db.is_closed():
             db.close()
 
-    app = FastAPI(title="Tick sightings", lifespan=lifespan)
+    app = FastAPI(
+        title="Elanco tick sightings",
+        version="1.0.0",
+        description="Search tick sightings and explore counts by location and time.",
+        lifespan=lifespan,
+        openapi_url="/openapi.json",
+        docs_url="/docs",
+        swagger_ui_parameters={"displayRequestDuration": True, "tryItOutEnabled": True},
+        openapi_tags=[
+            {"name": "Health", "description": "Service availability"},
+            {"name": "Sightings", "description": "Paginated sighting search"},
+            {"name": "Reports", "description": "Location and time aggregates"},
+        ],
+        responses={503: {"description": "Database unavailable"}},
+    )
     app.state.db = db
     app.state.sighting = sighting
 
@@ -28,13 +42,17 @@ def create_app(db_path: str | None = None) -> FastAPI:
     async def database_unavailable(request, exc):
         return JSONResponse(status_code=503, content={"detail": "Database unavailable; try again later"})
 
-    @app.get("/health")
+    @app.get("/", include_in_schema=False)
+    def index():
+        return RedirectResponse(url="/docs")
+
+    @app.get("/health", tags=["Health"], summary="Check service health")
     def health():
         with db.connection_context():
             db.execute_sql("SELECT 1")
         return {"status": "ok"}
 
-    @app.get("/sightings", response_model=SearchResponse)
+    @app.get("/sightings", response_model=SearchResponse, tags=["Sightings"], summary="Search sightings")
     def search(filters: Annotated[SearchFilters, Query()]):
         with db.connection_context(), db.atomic():
             query = filtered(sighting.select(), sighting, filters)
@@ -43,14 +61,14 @@ def create_app(db_path: str | None = None) -> FastAPI:
             return {"items": [serialize(row) for row in rows], "total": total,
                     "page": filters.page, "page_size": filters.page_size}
 
-    @app.get("/reports/regions", response_model=RegionReport)
+    @app.get("/reports/regions", response_model=RegionReport, tags=["Reports"], summary="Count sightings by location")
     def regions(filters: Annotated[Filters, Query()]):
         with db.connection_context():
             query = filtered(sighting.select(sighting.location.alias("region"), fn.COUNT(sighting.id).alias("count")), sighting, filters)
             rows = query.group_by(sighting.location).order_by(sighting.location).dicts()
             return {"grouped_by": "location", "items": list(rows)}
 
-    @app.get("/reports/trends", response_model=TrendReport)
+    @app.get("/reports/trends", response_model=TrendReport, tags=["Reports"], summary="Count sightings by week or month")
     def trends(filters: Annotated[TrendFilters, Query()]):
         if filters.period == "weekly":
             # The Monday of the containing week, including across year boundaries.
@@ -66,6 +84,3 @@ def create_app(db_path: str | None = None) -> FastAPI:
 
 
 app = create_app()
-
-
-

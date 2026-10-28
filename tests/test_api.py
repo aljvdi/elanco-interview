@@ -139,3 +139,23 @@ def test_missing_database_is_created_on_startup(tmp_path):
         assert path.exists()
         assert client.get("/health").status_code == 200
         assert client.get("/sightings").json()["items"] == []
+
+
+def test_swagger_frontend(client):
+    response = client.get("/", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == "/docs"
+    docs = client.get("/docs")
+    assert docs.status_code == 200
+    assert "swagger-ui" in docs.text
+    assert "/openapi.json" in docs.text
+    assert '"tryItOutEnabled": true' in docs.text
+
+
+def test_exported_openapi_matches_runtime(client):
+    import json
+    from pathlib import Path
+    schema = json.loads((Path(__file__).parents[1] / "openapi.json").read_text())
+    assert schema == client.get("/openapi.json").json()
+    assert schema["info"]["title"] == "Elanco tick sightings"
+    assert schema["paths"]["/sightings"]["get"]["tags"] == ["Sightings"]
