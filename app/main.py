@@ -3,7 +3,8 @@ from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import FastAPI, Query
-from peewee import fn
+from fastapi.responses import JSONResponse
+from peewee import OperationalError, fn
 
 from app.database import create_store, initialize
 from app.queries import Filters, RegionReport, SearchFilters, SearchResponse, TrendFilters, TrendReport, filtered, serialize
@@ -22,6 +23,10 @@ def create_app(db_path: str | None = None) -> FastAPI:
     app = FastAPI(title="Tick sightings", lifespan=lifespan)
     app.state.db = db
     app.state.sighting = sighting
+
+    @app.exception_handler(OperationalError)
+    async def database_unavailable(request, exc):
+        return JSONResponse(status_code=503, content={"detail": "Database unavailable; try again later"})
 
     @app.get("/health")
     def health():
@@ -61,5 +66,6 @@ def create_app(db_path: str | None = None) -> FastAPI:
 
 
 app = create_app()
+
 
 

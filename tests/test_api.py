@@ -93,3 +93,30 @@ def test_empty_reports(client, path):
 @pytest.mark.parametrize("path", ["/reports/trends?period=daily", "/reports/trends?start_date=bad", "/reports/regions?location=%20", "/reports/regions?start_date=2025-01-02&end_date=2025-01-01"])
 def test_bad_report_query(client, path):
     assert client.get(path).status_code == 422
+
+
+@pytest.mark.parametrize("path", ["/health", "/sightings", "/reports/regions", "/reports/trends"])
+def test_database_unavailable_returns_503(client, monkeypatch, path):
+    from peewee import OperationalError
+    def unavailable(*args, **kwargs):
+        raise OperationalError("private database path must not leak")
+    monkeypatch.setattr(client.app.state.db, "execute_sql", unavailable)
+    response = client.get(path)
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Database unavailable; try again later"}
+
+
+def test_location_is_treated_as_data(seeded):
+    assert seeded.get("/sightings", params={"location": "London' OR 1=1 --"}).json()["total"] == 0
+    assert seeded.get("/sightings").json()["total"] == 5
+
+
+def test_app_databases_are_isolated(client, tmp_path):
+    with TestClient(create_app(str(tmp_path / "other.sqlite"))) as other:
+        assert other.get("/sightings").json()["total"] == 0
+        assert client.get("/sightings").json()["total"] == 0
+
+
+def test_documented_routes_in_openapi(client):
+    schema = client.get("/openapi.json").json()
+    assert {"/health", "/sightings", "/reports/regions", "/reports/trends"} <= schema["paths"].keys()

@@ -111,3 +111,62 @@ def test_file_wrong_envelope(tmp_path):
     with pytest.raises(ImportFailure, match="JSON array"):
         load_records(source)
 
+
+
+@pytest.mark.parametrize("timestamp", ["2024-02-30T12:00:00", "2024-12-30", "0001-01-01T00:00:00+01:00", "9999-12-31T23:59:59-01:00"])
+def test_invalid_timestamps_are_skipped(store, record, timestamp):
+    result = import_records([dict(record, date=timestamp)], *store)
+    assert result.invalid == 1
+    assert result.inserted == 0
+
+
+def test_empty_import(store):
+    result = import_records([], *store)
+    assert (result.received, result.inserted, result.invalid) == (0, 0, 0)
+
+
+def test_database_error_rolls_back_entire_import(store, record):
+    from peewee import IntegrityError
+    db, sighting = store
+    with db.connection_context():
+        db.execute_sql("CREATE TRIGGER reject_row BEFORE INSERT ON sighting WHEN NEW.id = 'reject' BEGIN SELECT RAISE(ABORT, 'simulated failure'); END")
+    with pytest.raises(IntegrityError):
+        import_records([record, dict(record, id="reject")], db, sighting)
+    with db.connection_context():
+        assert sighting.select().count() == 0
+
+
+def test_cli_file_import_and_reimport(tmp_path, record, capsys):
+    source = tmp_path / "source.json"
+    source.write_text(json.dumps([record, {}]), encoding="utf-8")
+    args = ["--file", str(source), "--db", str(tmp_path / "cli.sqlite")]
+    assert main(args) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert (result["inserted"], result["invalid"]) == (1, 1)
+    assert main(args) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert (result["inserted"], result["duplicates"], result["invalid"]) == (0, 1, 1)
+
+
+def test_cli_api_failure_preserves_database(store, record, monkeypatch, capsys):
+    import app.importer as importer
+    db, sighting = store
+    import_records([record], db, sighting)
+    requests = []
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(429)
+    real_client = httpx.Client
+    monkeypatch.setattr(importer.httpx, "Client", lambda: real_client(transport=httpx.MockTransport(handler)))
+    assert main(["--api", "--db", str(db.database)]) == 1
+    assert "HTTP 429" in capsys.readouterr().err
+    assert len(requests) == 1
+    with db.connection_context():
+        assert sighting.select().count() == 1
+
+
+def test_cli_database_failure_has_clear_error(tmp_path, record, capsys):
+    source = tmp_path / "source.json"
+    source.write_text(json.dumps([record]))
+    assert main(["--file", str(source), "--db", str(tmp_path / "missing" / "data.sqlite")]) == 1
+    assert "Import failed" in capsys.readouterr().err

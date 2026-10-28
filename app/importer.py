@@ -43,7 +43,10 @@ class SourceSighting(BaseModel):
             raise ValueError("expected an ISO 8601 timestamp")
         parsed = datetime.fromisoformat(value)
         if parsed.tzinfo is not None:
-            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+            try:
+                parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+            except OverflowError as exc:
+                raise ValueError("timestamp outside supported range") from exc
         return parsed
 
     @field_validator("species", "latinName")
@@ -136,3 +139,4 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
