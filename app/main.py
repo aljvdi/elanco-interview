@@ -1,24 +1,43 @@
-"""Read-only tick sighting API. Import data explicitly with app.importer."""
+"""Tick sightings API backed by a health-checked upstream snapshot."""
 from contextlib import asynccontextmanager
+import logging
+
+import httpx
 from typing import Annotated
 
 from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse, RedirectResponse
 from peewee import OperationalError, fn
+from starlette.concurrency import run_in_threadpool
 
 from app.database import create_store, initialize
 from app.queries import Filters, RegionReport, SearchFilters, SearchResponse, TrendFilters, TrendReport, filtered, serialize
 
+from app.upstream import UpstreamFailure, refresh_snapshot
 
-def create_app(db_path: str | None = None) -> FastAPI:
+logger = logging.getLogger(__name__)
+
+
+def create_app(
+    db_path: str | None = None,
+    *, upstream_transport: httpx.BaseTransport | None = None,
+) -> FastAPI:
     db, sighting = create_store(db_path)
 
     @asynccontextmanager
     async def lifespan(app):
         initialize(db, sighting)
-        yield
-        if not db.is_closed():
-            db.close()
+        with httpx.Client(transport=upstream_transport) as upstream:
+            app.state.upstream = upstream
+            try:
+                app.state.snapshot = await run_in_threadpool(refresh_snapshot, upstream, db, sighting)
+            except UpstreamFailure as exc:
+                logger.warning("Startup snapshot refresh failed: %s", exc)
+            try:
+                yield
+            finally:
+                if not db.is_closed():
+                    db.close()
 
     app = FastAPI(
         title="Elanco tick sightings",
@@ -41,6 +60,11 @@ def create_app(db_path: str | None = None) -> FastAPI:
     @app.exception_handler(OperationalError)
     async def database_unavailable(request, exc):
         return JSONResponse(status_code=503, content={"detail": "Database unavailable; try again later"})
+
+    @app.exception_handler(UpstreamFailure)
+    async def upstream_unavailable(request, exc):
+        headers = {"Retry-After": exc.retry_after} if exc.retry_after else None
+        return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)}, headers=headers)
 
     @app.get("/", include_in_schema=False)
     def index():

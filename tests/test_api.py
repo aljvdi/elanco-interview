@@ -1,12 +1,20 @@
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
 
 
+def create_test_app(path):
+    def handler(request):
+        payload = {"status": "healthy"} if request.url.path.endswith("/health") else []
+        return httpx.Response(200, json=payload)
+    return create_app(path, upstream_transport=httpx.MockTransport(handler))
+
+
 @pytest.fixture
 def client(tmp_path):
-    app = create_app(str(tmp_path / "test.sqlite"))
+    app = create_test_app(str(tmp_path / "test.sqlite"))
     with TestClient(app) as test_client:
         yield test_client
 
@@ -17,7 +25,7 @@ def test_health(client):
 
 @pytest.fixture
 def seeded(client):
-    from app.importer import import_records
+    from app.upstream import replace_snapshot
     rows = [
         {"id": "b", "date": "2024-12-30T00:00:00", "location": "London", "species": "Example tick", "latinName": "Example species"},
         {"id": "a", "date": "2024-12-30T00:00:00", "location": "London"},
@@ -25,7 +33,7 @@ def seeded(client):
         {"id": "d", "date": "2025-01-01T00:00:00", "location": "London"},
         {"id": "e", "date": "2025-01-06T12:00:00", "location": "Bristol"},
     ]
-    import_records(rows, client.app.state.db, client.app.state.sighting)
+    replace_snapshot(rows, client.app.state.db, client.app.state.sighting)
     return client
 
 
@@ -79,9 +87,9 @@ def test_monthly_and_report_filters(seeded):
 
 
 def test_sunday_belongs_to_preceding_monday(seeded):
-    from app.importer import import_records
-    import_records([{"id": "sunday", "date": "2025-01-05T23:59:59", "location": "London"}], seeded.app.state.db, seeded.app.state.sighting)
-    assert seeded.get("/reports/trends").json()["items"][0] == {"period_start": "2024-12-30", "count": 5}
+    from app.upstream import replace_snapshot
+    replace_snapshot([{"id": "sunday", "date": "2025-01-05T23:59:59", "location": "London"}], seeded.app.state.db, seeded.app.state.sighting)
+    assert seeded.get("/reports/trends").json()["items"][0] == {"period_start": "2024-12-30", "count": 1}
 
 
 @pytest.mark.parametrize("path", ["/reports/regions", "/reports/trends", "/reports/trends?period=monthly"])
@@ -112,7 +120,7 @@ def test_location_is_treated_as_data(seeded):
 
 
 def test_app_databases_are_isolated(seeded, tmp_path):
-    with TestClient(create_app(str(tmp_path / "other.sqlite"))) as other:
+    with TestClient(create_test_app(str(tmp_path / "other.sqlite"))) as other:
         assert other.get("/sightings").json()["total"] == 0
         assert seeded.get("/sightings").json()["total"] == 5
 
@@ -135,7 +143,7 @@ def test_parallel_reads_use_independent_connections(seeded):
 def test_missing_database_is_created_on_startup(tmp_path):
     path = tmp_path / "fresh.sqlite"
     assert not path.exists()
-    with TestClient(create_app(str(path))) as client:
+    with TestClient(create_test_app(str(path))) as client:
         assert path.exists()
         assert client.get("/health").status_code == 200
         assert client.get("/sightings").json()["items"] == []
