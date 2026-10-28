@@ -111,12 +111,31 @@ def test_location_is_treated_as_data(seeded):
     assert seeded.get("/sightings").json()["total"] == 5
 
 
-def test_app_databases_are_isolated(client, tmp_path):
+def test_app_databases_are_isolated(seeded, tmp_path):
     with TestClient(create_app(str(tmp_path / "other.sqlite"))) as other:
         assert other.get("/sightings").json()["total"] == 0
-        assert client.get("/sightings").json()["total"] == 0
+        assert seeded.get("/sightings").json()["total"] == 5
 
 
 def test_documented_routes_in_openapi(client):
     schema = client.get("/openapi.json").json()
     assert {"/health", "/sightings", "/reports/regions", "/reports/trends"} <= schema["paths"].keys()
+
+
+
+def test_parallel_reads_use_independent_connections(seeded):
+    from concurrent.futures import ThreadPoolExecutor
+    paths = ["/sightings", "/reports/regions", "/reports/trends", "/health"] * 4
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        responses = list(pool.map(seeded.get, paths))
+    assert all(response.status_code == 200 for response in responses)
+    assert all(response.json()["total"] == 5 for response in responses[::4])
+
+
+def test_missing_database_is_created_on_startup(tmp_path):
+    path = tmp_path / "fresh.sqlite"
+    assert not path.exists()
+    with TestClient(create_app(str(path))) as client:
+        assert path.exists()
+        assert client.get("/health").status_code == 200
+        assert client.get("/sightings").json()["items"] == []
