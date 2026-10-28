@@ -1,6 +1,8 @@
 """Tick sightings API backed by a health-checked upstream snapshot."""
+import asyncio
 from contextlib import asynccontextmanager
 import logging
+from threading import Lock
 from typing import Annotated
 
 import httpx
@@ -16,6 +18,7 @@ from app.queries import (
     TrendFilters, TrendReport, filtered, serialize,
 )
 
+from app.schedule import REFRESH_INTERVAL_SECONDS, refresh_periodically
 from app.upstream import UpstreamFailure, fetch_sighting, refresh_snapshot
 
 logger = logging.getLogger(__name__)
@@ -24,8 +27,17 @@ logger = logging.getLogger(__name__)
 def create_app(
     db_path: str | None = None,
     *, upstream_transport: httpx.BaseTransport | None = None,
+    refresh_interval: float = REFRESH_INTERVAL_SECONDS,
 ) -> FastAPI:
+    if refresh_interval <= 0:
+        raise ValueError("refresh_interval must be positive")
     db, sighting = create_store(db_path)
+    refresh_lock = Lock()
+
+    def refresh():
+        # Startup, scheduled and request-triggered snapshots share the same lock.
+        with refresh_lock:
+            app.state.snapshot = refresh_snapshot(app.state.upstream, db, sighting)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -33,12 +45,18 @@ def create_app(
         with httpx.Client(transport=upstream_transport) as upstream:
             app.state.upstream = upstream
             try:
-                app.state.snapshot = await run_in_threadpool(refresh_snapshot, upstream, db, sighting)
+                await run_in_threadpool(refresh)
             except UpstreamFailure as exc:
                 logger.warning("Startup snapshot refresh failed: %s", exc)
+            stop = asyncio.Event()
+            task = asyncio.create_task(refresh_periodically(refresh, stop, refresh_interval))
+            app.state.refresh_task = task
             try:
                 yield
             finally:
+                stop.set()
+                # Finish any in-flight refresh before closing its HTTP client.
+                await task
                 if not db.is_closed():
                     db.close()
 
@@ -87,7 +105,7 @@ def create_app(
         with db.connection_context():
             found = filtered(sighting.select(), sighting, filters).exists()
         if not found:
-            app.state.snapshot = refresh_snapshot(app.state.upstream, db, sighting)
+            refresh()
 
     @app.get("/sightings", response_model=SearchResponse, tags=["Sightings"], summary="Search sightings")
     def search(filters: Annotated[SearchFilters, Query()]):
