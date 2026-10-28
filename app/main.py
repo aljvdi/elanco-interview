@@ -1,9 +1,9 @@
 """Tick sightings API backed by a health-checked upstream snapshot."""
 from contextlib import asynccontextmanager
 import logging
+from typing import Annotated
 
 import httpx
-from typing import Annotated
 
 from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -11,9 +11,12 @@ from peewee import OperationalError, fn
 from starlette.concurrency import run_in_threadpool
 
 from app.database import create_store, initialize
-from app.queries import Filters, RegionReport, SearchFilters, SearchResponse, TrendFilters, TrendReport, filtered, serialize
+from app.queries import (
+    Filters, RegionReport, SearchFilters, SearchResponse, SightingResponse,
+    TrendFilters, TrendReport, filtered, serialize,
+)
 
-from app.upstream import UpstreamFailure, refresh_snapshot
+from app.upstream import UpstreamFailure, fetch_sighting, refresh_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +55,11 @@ def create_app(
             {"name": "Sightings", "description": "Paginated sighting search"},
             {"name": "Reports", "description": "Location and time aggregates"},
         ],
-        responses={503: {"description": "Database unavailable"}},
+        responses={
+            502: {"description": "Upstream request or response failed"},
+            503: {"description": "Database or upstream unavailable"},
+            504: {"description": "Upstream request timed out"},
+        },
     )
     app.state.db = db
     app.state.sighting = sighting
@@ -76,8 +83,15 @@ def create_app(
             db.execute_sql("SELECT 1")
         return {"status": "ok"}
 
+    def ensure_matches(filters: Filters):
+        with db.connection_context():
+            found = filtered(sighting.select(), sighting, filters).exists()
+        if not found:
+            app.state.snapshot = refresh_snapshot(app.state.upstream, db, sighting)
+
     @app.get("/sightings", response_model=SearchResponse, tags=["Sightings"], summary="Search sightings")
     def search(filters: Annotated[SearchFilters, Query()]):
+        ensure_matches(filters)
         with db.connection_context(), db.atomic():
             query = filtered(sighting.select(), sighting, filters)
             total = query.count()
@@ -85,8 +99,21 @@ def create_app(
             return {"items": [serialize(row) for row in rows], "total": total,
                     "page": filters.page, "page_size": filters.page_size}
 
+    @app.get(
+        "/sightings/{sighting_id}", response_model=SightingResponse,
+        tags=["Sightings"], summary="Get a sighting by ID",
+        responses={404: {"description": "Sighting not found"}},
+    )
+    def detail(sighting_id: str):
+        with db.connection_context():
+            row = sighting.get_or_none(sighting.id == sighting_id)
+            if row is not None:
+                return serialize(row)
+        return fetch_sighting(app.state.upstream, sighting_id)
+
     @app.get("/reports/regions", response_model=RegionReport, tags=["Reports"], summary="Count sightings by location")
     def regions(filters: Annotated[Filters, Query()]):
+        ensure_matches(filters)
         with db.connection_context():
             query = filtered(sighting.select(sighting.location.alias("region"), fn.COUNT(sighting.id).alias("count")), sighting, filters)
             rows = query.group_by(sighting.location).order_by(sighting.location).dicts()
@@ -94,6 +121,7 @@ def create_app(
 
     @app.get("/reports/trends", response_model=TrendReport, tags=["Reports"], summary="Count sightings by week or month")
     def trends(filters: Annotated[TrendFilters, Query()]):
+        ensure_matches(filters)
         if filters.period == "weekly":
             # The Monday of the containing week, including across year boundaries.
             bucket = fn.date(sighting.date, "-6 days", "weekday 1")

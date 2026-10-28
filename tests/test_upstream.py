@@ -172,3 +172,139 @@ def test_every_startup_refreshes_and_failed_health_keeps_cache(tmp_path, record)
         assert client.get("/health").status_code == 200
         assert client.get("/sightings").json()["items"][0]["location"] == "Bristol"
     assert requests == ["/data/health", "/data/tick-sightings"] * 2 + ["/data/health"]
+
+
+@pytest.mark.parametrize("path", [
+    "/sightings?location=London&page_size=1",
+    "/reports/regions?location=London",
+    "/reports/trends?location=London&period=monthly",
+])
+def test_missing_data_retries_upstream_with_same_api_shape(tmp_path, record, path):
+    requests = []
+    records = []
+    def handler(request):
+        requests.append(request.url.path)
+        return httpx.Response(200, json={"status": "healthy"} if request.url.path.endswith("/health") else records)
+    app = create_app(str(tmp_path / "fallback.sqlite"), upstream_transport=httpx.MockTransport(handler))
+    with TestClient(app) as client:
+        records = [record, dict(record, id="other", location="Bristol")]
+        response = client.get(path)
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body["items"]) == 1
+        assert "proxied" not in body and "source" not in body
+        if path.startswith("/sightings"):
+            assert body["total"] == 1
+            assert body["items"][0]["id"] == record["id"]
+        else:
+            assert body["items"][0]["count"] == 1
+        assert len(requests) == 4  # Startup health/data, then fallback health/data.
+        assert client.get(path).status_code == 200
+        assert len(requests) == 4  # Matching cached reads do not call upstream.
+
+
+def test_filter_miss_refreshes_existing_snapshot(tmp_path, record):
+    records = [dict(record, location="Bristol")]
+    def handler(request):
+        return httpx.Response(200, json={"status": "healthy"} if request.url.path.endswith("/health") else records)
+    with TestClient(create_app(str(tmp_path / "miss.sqlite"), upstream_transport=httpx.MockTransport(handler))) as client:
+        records = [record]
+        response = client.get("/sightings?location=London")
+        assert response.json()["total"] == 1
+        assert response.json()["items"][0]["location"] == "London"
+
+
+@pytest.mark.parametrize("status,code", [(429, 503), (500, 502)])
+def test_fallback_error_codes_and_retry_after(tmp_path, status, code):
+    def handler(request):
+        return httpx.Response(status, headers={"Retry-After": "60"})
+    with TestClient(create_app(str(tmp_path / "failure.sqlite"), upstream_transport=httpx.MockTransport(handler))) as client:
+        response = client.get("/sightings")
+        assert response.status_code == code
+        assert response.headers["Retry-After"] == "60"
+        assert response.json() == {"detail": f"Upstream HTTP {status}"}
+        assert client.get("/docs").status_code == 200
+
+
+def test_fallback_timeout(tmp_path):
+    def handler(request):
+        raise httpx.ReadTimeout("timeout", request=request)
+    with TestClient(create_app(str(tmp_path / "timeout.sqlite"), upstream_transport=httpx.MockTransport(handler))) as client:
+        assert client.get("/sightings").status_code == 504
+
+
+def test_detail_uses_cache_then_documented_upstream_route(tmp_path, record):
+    requests = []
+    def handler(request):
+        requests.append(request.url.path)
+        if request.url.path.endswith("/health"):
+            return httpx.Response(200, json={"status": "healthy"})
+        if request.url.path == "/data/tick-sightings":
+            return httpx.Response(200, json=[record])
+        return httpx.Response(200, json=dict(record, id="remote"))
+    with TestClient(create_app(str(tmp_path / "detail.sqlite"), upstream_transport=httpx.MockTransport(handler))) as client:
+        assert client.get("/sightings/test-1").json()["id"] == "test-1"
+        assert len(requests) == 2
+        body = client.get("/sightings/remote").json()
+        assert body["id"] == "remote"
+        assert set(body) == {"id", "date", "location", "species", "latinName"}
+    assert requests[-1] == "/data/tick-sightings/remote"
+
+
+@pytest.mark.parametrize("status,payload,expected", [
+    (404, {"error": "Not found"}, 404),
+    (500, {}, 502),
+    (200, {}, 502),
+    (200, {"id": "wrong", "date": "2024-01-01T12:00:00", "location": "London"}, 502),
+])
+def test_detail_missing_or_bad_upstream(tmp_path, status, payload, expected):
+    def handler(request):
+        if request.url.path.endswith("/health"):
+            return httpx.Response(200, json={"status": "healthy"})
+        if request.url.path == "/data/tick-sightings":
+            return httpx.Response(200, json=[])
+        return httpx.Response(status, json=payload)
+    with TestClient(create_app(str(tmp_path / "detail-error.sqlite"), upstream_transport=httpx.MockTransport(handler))) as client:
+        assert client.get("/sightings/missing").status_code == expected
+
+
+def test_invalid_query_does_not_call_upstream_again(tmp_path):
+    requests = []
+    def handler(request):
+        requests.append(request.url.path)
+        return httpx.Response(503)
+    with TestClient(create_app(str(tmp_path / "invalid.sqlite"), upstream_transport=httpx.MockTransport(handler))) as client:
+        assert client.get("/sightings?page=0").status_code == 422
+        assert len(requests) == 1
+
+
+@pytest.mark.parametrize("status", [429, 500])
+def test_failed_download_preserves_cache_after_healthy_check(store, record, status):
+    replace_snapshot([record], *store)
+    requests = []
+    def handler(request):
+        requests.append(request.url.path)
+        if request.url.path.endswith("/health"):
+            return httpx.Response(200, json={"status": "healthy"})
+        return httpx.Response(status)
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(UpstreamFailure, match=f"HTTP {status}"):
+            refresh_snapshot(client, *store)
+    assert requests == ["/data/health", "/data/tick-sightings"]
+    db, sighting = store
+    with db.connection_context():
+        assert sighting.get().id == record["id"]
+
+
+def test_failed_filter_fallback_preserves_other_cached_sightings(tmp_path, record):
+    healthy = True
+    def handler(request):
+        if not healthy:
+            return httpx.Response(500)
+        if request.url.path.endswith("/health"):
+            return httpx.Response(200, json={"status": "healthy"})
+        return httpx.Response(200, json=[record])
+    with TestClient(create_app(str(tmp_path / "retained.sqlite"), upstream_transport=httpx.MockTransport(handler))) as client:
+        healthy = False
+        assert client.get("/sightings?location=Bristol").status_code == 502
+        assert client.get("/sightings?location=London").json()["total"] == 1

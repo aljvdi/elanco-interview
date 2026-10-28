@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import re
+from urllib.parse import quote
 
 import httpx
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
@@ -119,3 +120,16 @@ def replace_snapshot(records: list, db, sighting) -> SnapshotResult:
 
 def refresh_snapshot(client: httpx.Client, db, sighting) -> SnapshotResult:
     return replace_snapshot(fetch_records(client), db, sighting)
+
+
+def fetch_sighting(client: httpx.Client, sighting_id: str) -> dict:
+    payload = get_json(
+        client, f"/tick-sightings/{quote(sighting_id, safe='')}", allow_not_found=True
+    )
+    try:
+        row = SourceSighting.model_validate(payload)
+    except ValidationError as exc:
+        raise UpstreamFailure("Upstream sighting is invalid") from exc
+    if row.id != sighting_id:
+        raise UpstreamFailure("Upstream returned a different sighting")
+    return row.model_dump()

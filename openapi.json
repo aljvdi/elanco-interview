@@ -22,8 +22,14 @@
               }
             }
           },
+          "502": {
+            "description": "Upstream request or response failed"
+          },
           "503": {
-            "description": "Database unavailable"
+            "description": "Database or upstream unavailable"
+          },
+          "504": {
+            "description": "Upstream request timed out"
           }
         }
       }
@@ -123,8 +129,68 @@
               }
             }
           },
+          "502": {
+            "description": "Upstream request or response failed"
+          },
           "503": {
-            "description": "Database unavailable"
+            "description": "Database or upstream unavailable"
+          },
+          "504": {
+            "description": "Upstream request timed out"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sightings/{sighting_id}": {
+      "get": {
+        "tags": [
+          "Sightings"
+        ],
+        "summary": "Get a sighting by ID",
+        "operationId": "detail_sightings__sighting_id__get",
+        "parameters": [
+          {
+            "name": "sighting_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Sighting Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SightingResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream request or response failed"
+          },
+          "503": {
+            "description": "Database or upstream unavailable"
+          },
+          "504": {
+            "description": "Upstream request timed out"
+          },
+          "404": {
+            "description": "Sighting not found"
           },
           "422": {
             "description": "Validation Error",
@@ -211,8 +277,14 @@
               }
             }
           },
+          "502": {
+            "description": "Upstream request or response failed"
+          },
           "503": {
-            "description": "Database unavailable"
+            "description": "Database or upstream unavailable"
+          },
+          "504": {
+            "description": "Upstream request timed out"
           },
           "422": {
             "description": "Validation Error",
@@ -313,8 +385,14 @@
               }
             }
           },
+          "502": {
+            "description": "Upstream request or response failed"
+          },
           "503": {
-            "description": "Database unavailable"
+            "description": "Database or upstream unavailable"
+          },
+          "504": {
+            "description": "Upstream request timed out"
           },
           "422": {
             "description": "Validation Error",

@@ -7,9 +7,11 @@ from app.main import create_app
 
 def create_test_app(path):
     def handler(request):
-        payload = {"status": "healthy"} if request.url.path.endswith("/health") else []
+        payload = {"status": "healthy"} if request.url.path.endswith("/health") else app.state.source_records
         return httpx.Response(200, json=payload)
-    return create_app(path, upstream_transport=httpx.MockTransport(handler))
+    app = create_app(path, upstream_transport=httpx.MockTransport(handler))
+    app.state.source_records = []
+    return app
 
 
 @pytest.fixture
@@ -33,6 +35,7 @@ def seeded(client):
         {"id": "d", "date": "2025-01-01T00:00:00", "location": "London"},
         {"id": "e", "date": "2025-01-06T12:00:00", "location": "Bristol"},
     ]
+    client.app.state.source_records = rows
     replace_snapshot(rows, client.app.state.db, client.app.state.sighting)
     return client
 
