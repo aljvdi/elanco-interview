@@ -1,9 +1,11 @@
 """Read-only tick sighting API. Import data explicitly with app.importer."""
 from contextlib import asynccontextmanager
+from typing import Annotated
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 
 from app.database import create_store, initialize
+from app.queries import SearchFilters, SearchResponse, filtered, serialize
 
 
 def create_app(db_path: str | None = None) -> FastAPI:
@@ -26,7 +28,17 @@ def create_app(db_path: str | None = None) -> FastAPI:
             db.execute_sql("SELECT 1")
         return {"status": "ok"}
 
+    @app.get("/sightings", response_model=SearchResponse)
+    def search(filters: Annotated[SearchFilters, Query()]):
+        with db.connection_context(), db.atomic():
+            query = filtered(sighting.select(), sighting, filters)
+            total = query.count()
+            rows = query.order_by(sighting.date, sighting.id).paginate(filters.page, filters.page_size)
+            return {"items": [serialize(row) for row in rows], "total": total,
+                    "page": filters.page, "page_size": filters.page_size}
+
     return app
 
 
 app = create_app()
+
