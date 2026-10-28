@@ -7,7 +7,14 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: ./.venv/bin/python
+          - os: windows-latest
+            python: ./.venv/Scripts/python.exe
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 5
 
     steps:
@@ -26,7 +33,7 @@ jobs:
         run: python -m venv .venv
 
       - name: Install dependencies
-        run: .venv/bin/python -m pip install -r requirements.txt
+        run: ${{ matrix.python }} -m pip install -r requirements.txt
 
       - name: Run tests
-        run: .venv/bin/python -m pytest -q
+        run: ${{ matrix.python }} -m pytest -q

@@ -170,3 +170,27 @@ def test_exported_openapi_matches_runtime(client):
     assert schema == client.get("/openapi.json").json()
     assert schema["info"]["title"] == "Elanco tick sightings"
     assert schema["paths"]["/sightings"]["get"]["tags"] == ["Sightings"]
+
+
+@pytest.mark.parametrize("period,last_timestamp,next_timestamp,last_bucket,next_bucket", [
+    ("monthly", "2024-12-31T23:59:59.999999", "2025-01-01T00:00:00", "2024-12-01", "2025-01-01"),
+    ("monthly", "2024-02-29T23:59:59.999999", "2024-03-01T00:00:00", "2024-02-01", "2024-03-01"),
+    ("weekly", "2025-01-05T23:59:59.999999", "2025-01-06T00:00:00", "2024-12-30", "2025-01-06"),
+    ("weekly", "2024-12-29T23:59:59.999999", "2024-12-30T00:00:00", "2024-12-23", "2024-12-30"),
+])
+def test_trends_preserve_calendar_date_at_last_microsecond(
+    client, period, last_timestamp, next_timestamp, last_bucket, next_bucket,
+):
+    from app.upstream import replace_snapshot
+    rows = [
+        {"id": "last", "date": last_timestamp, "location": "London"},
+        {"id": "next", "date": next_timestamp, "location": "London"},
+    ]
+    client.app.state.source_records = rows
+    replace_snapshot(rows, client.app.state.db, client.app.state.sighting)
+    response = client.get("/reports/trends", params={"period": period})
+    assert response.status_code == 200
+    assert response.json()["items"] == [
+        {"period_start": last_bucket, "count": 1},
+        {"period_start": next_bucket, "count": 1},
+    ]

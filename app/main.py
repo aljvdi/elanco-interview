@@ -140,11 +140,13 @@ def create_app(
     @app.get("/reports/trends", response_model=TrendReport, tags=["Reports"], summary="Count sightings by week or month")
     def trends(filters: Annotated[TrendFilters, Query()]):
         ensure_matches(filters)
+        # Stored timestamps are normalized before saving. Group by their calendar
+        # date so SQLite cannot round fractional seconds into the following day.
+        day = fn.substr(sighting.date, 1, 10)
         if filters.period == "weekly":
-            # The Monday of the containing week, including across year boundaries.
-            bucket = fn.date(sighting.date, "-6 days", "weekday 1")
+            bucket = fn.date(day, "-6 days", "weekday 1")
         else:
-            bucket = fn.strftime("%Y-%m-01", sighting.date)
+            bucket = fn.strftime("%Y-%m-01", day)
         with db.connection_context():
             query = filtered(sighting.select(bucket.alias("period_start"), fn.COUNT(sighting.id).alias("count")), sighting, filters)
             rows = query.group_by(bucket).order_by(bucket).dicts()
