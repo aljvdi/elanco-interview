@@ -3,9 +3,10 @@ from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import FastAPI, Query
+from peewee import fn
 
 from app.database import create_store, initialize
-from app.queries import SearchFilters, SearchResponse, filtered, serialize
+from app.queries import Filters, RegionReport, SearchFilters, SearchResponse, TrendFilters, TrendReport, filtered, serialize
 
 
 def create_app(db_path: str | None = None) -> FastAPI:
@@ -37,8 +38,28 @@ def create_app(db_path: str | None = None) -> FastAPI:
             return {"items": [serialize(row) for row in rows], "total": total,
                     "page": filters.page, "page_size": filters.page_size}
 
+    @app.get("/reports/regions", response_model=RegionReport)
+    def regions(filters: Annotated[Filters, Query()]):
+        with db.connection_context():
+            query = filtered(sighting.select(sighting.location.alias("region"), fn.COUNT(sighting.id).alias("count")), sighting, filters)
+            rows = query.group_by(sighting.location).order_by(sighting.location).dicts()
+            return {"grouped_by": "location", "items": list(rows)}
+
+    @app.get("/reports/trends", response_model=TrendReport)
+    def trends(filters: Annotated[TrendFilters, Query()]):
+        if filters.period == "weekly":
+            # The Monday of the containing week, including across year boundaries.
+            bucket = fn.date(sighting.date, "-6 days", "weekday 1")
+        else:
+            bucket = fn.strftime("%Y-%m-01", sighting.date)
+        with db.connection_context():
+            query = filtered(sighting.select(bucket.alias("period_start"), fn.COUNT(sighting.id).alias("count")), sighting, filters)
+            rows = query.group_by(bucket).order_by(bucket).dicts()
+            return {"period": filters.period, "items": list(rows)}
+
     return app
 
 
 app = create_app()
+
 

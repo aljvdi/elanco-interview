@@ -60,3 +60,36 @@ def test_pagination_is_stable(seeded):
 @pytest.mark.parametrize("query", ["start_date=no", "end_date=2024-02-30", "start_date=2025-01-02&end_date=2025-01-01", "page=0", "page_size=201", "page_size=-1", "page=abc", "location=", "location=%20%20", "typo=London"])
 def test_bad_search_query(client, query):
     assert client.get(f"/sightings?{query}").status_code == 422
+
+
+def test_region_counts(seeded):
+    response = seeded.get("/reports/regions")
+    assert response.status_code == 200
+    assert response.json() == {"grouped_by": "location", "items": [{"region": "Bristol", "count": 2}, {"region": "London", "count": 3}]}
+    assert seeded.get("/reports/regions?start_date=2025-01-01&location=london").json()["items"] == [{"region": "London", "count": 1}]
+
+
+def test_weekly_crosses_year_boundary(seeded):
+    assert seeded.get("/reports/trends?period=weekly").json() == {"period": "weekly", "items": [{"period_start": "2024-12-30", "count": 4}, {"period_start": "2025-01-06", "count": 1}]}
+
+
+def test_monthly_and_report_filters(seeded):
+    assert seeded.get("/reports/trends?period=monthly").json() == {"period": "monthly", "items": [{"period_start": "2024-12-01", "count": 3}, {"period_start": "2025-01-01", "count": 2}]}
+    assert seeded.get("/reports/trends?period=monthly&location=bristol&end_date=2024-12-31").json()["items"] == [{"period_start": "2024-12-01", "count": 1}]
+
+
+def test_sunday_belongs_to_preceding_monday(seeded):
+    from app.importer import import_records
+    import_records([{"id": "sunday", "date": "2025-01-05T23:59:59", "location": "London"}], seeded.app.state.db, seeded.app.state.sighting)
+    assert seeded.get("/reports/trends").json()["items"][0] == {"period_start": "2024-12-30", "count": 5}
+
+
+@pytest.mark.parametrize("path", ["/reports/regions", "/reports/trends", "/reports/trends?period=monthly"])
+def test_empty_reports(client, path):
+    assert client.get(path).status_code == 200
+    assert client.get(path).json()["items"] == []
+
+
+@pytest.mark.parametrize("path", ["/reports/trends?period=daily", "/reports/trends?start_date=bad", "/reports/regions?location=%20", "/reports/regions?start_date=2025-01-02&end_date=2025-01-01"])
+def test_bad_report_query(client, path):
+    assert client.get(path).status_code == 422

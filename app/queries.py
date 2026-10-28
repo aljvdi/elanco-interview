@@ -1,7 +1,7 @@
 """Validated query parameters shared by search and reports."""
 from datetime import date, datetime, time
 
-from fastapi import HTTPException
+from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
@@ -16,6 +16,10 @@ class Filters(BaseModel):
         if self.start_date and self.end_date and self.start_date > self.end_date:
             raise ValueError("start_date must be on or before end_date")
         return self
+
+
+class TrendFilters(Filters):
+    period: Literal["weekly", "monthly"] = "weekly"
 
 
 class SearchFilters(Filters):
@@ -51,3 +55,24 @@ class SearchResponse(BaseModel):
 def serialize(row) -> dict:
     return {"id": row.id, "date": row.date, "location": row.location,
             "species": row.species, "latinName": row.latin_name}
+
+
+class RegionCount(BaseModel):
+    region: str
+    count: int
+
+
+class RegionReport(BaseModel):
+    grouped_by: str = "location"
+    items: list[RegionCount]
+
+
+class TrendPoint(BaseModel):
+    period_start: date
+    count: int
+
+
+class TrendReport(BaseModel):
+    period: str
+    items: list[TrendPoint]
+
