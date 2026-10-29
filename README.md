@@ -28,8 +28,16 @@ database. The hourly timer runs inside the app, so use a single server worker.
 Use Python 3.11 or later. From the project folder in PowerShell:
 
 ```powershell
+# create the virtual env
 python -m venv .venv
+
+# start it
+source .venv/bin/activate
+
+# install requirements
 pip install -r requirements.txt
+
+# run the app
 python -m uvicorn app.main:app --reload
 ```
 
